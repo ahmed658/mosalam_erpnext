@@ -1,0 +1,200 @@
+version: '3.8'
+
+services:
+  backend:
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+    image: frappe/erpnext:${ERPNEXT_VERSION}
+    networks:
+      bench-network:
+      mariadb-network:
+    platform: ${PLATFORM:="linux/amd64"}
+    restart: always
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+
+  configurator:
+    entrypoint: 
+      - bash
+      - -c
+    command: >
+      ls -1 apps > sites/apps.txt &&
+      bench set-config -g db_host ${DB_HOST} &&
+      bench set-config -gp db_port ${DB_PORT} &&
+      bench set-config -g redis_cache "redis://${REDIS_CACHE}" &&
+      bench set-config -g redis_queue "redis://${REDIS_QUEUE}" &&
+      bench set-config -g redis_socketio "redis://${REDIS_QUEUE}" &&
+      bench set-config -gp socketio_port ${SOCKETIO_PORT}
+    depends_on:
+      redis-cache:
+        condition: service_started
+      redis-queue:
+        condition: service_started
+    environment:
+      DB_HOST: ${DB_HOST}
+      DB_PORT: "${DB_PORT}"
+      REDIS_CACHE: ${REDIS_CACHE}
+      REDIS_QUEUE: ${REDIS_QUEUE}
+      SOCKETIO_PORT: "${SOCKETIO_PORT}"
+    image: frappe/erpnext:${ERPNEXT_VERSION}
+    networks:
+      bench-network:
+      mariadb-network:
+    platform: ${PLATFORM:="linux/amd64"}
+    restart: always
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+
+  frontend:
+    command: nginx-entrypoint.sh
+    depends_on:
+      backend:
+        condition: service_started
+      websocket:
+        condition: service_started
+    environment:
+      BACKEND: backend:${HTTP_PUBLISH_PORT:-8000}
+      CLIENT_MAX_BODY_SIZE: ${CLIENT_MAX_BODY_SIZE:-50m}
+      FRAPPE_SITE_NAME_HEADER: ${FRAPPE_SITE_NAME_HEADER:-$host}
+      PROXY_READ_TIMEOUT: "${PROXY_READ_TIMEOUT:-120}"
+      SOCKETIO: websocket:${SOCKETIO_PORT:-9000}
+      UPSTREAM_REAL_IP_ADDRESS: ${UPSTREAM_REAL_IP_ADDRESS:-127.0.0.1}
+      UPSTREAM_REAL_IP_HEADER: ${UPSTREAM_REAL_IP_HEADER:-X-Forwarded-For}
+      UPSTREAM_REAL_IP_RECURSIVE: ${UPSTREAM_REAL_IP_RECURSIVE:-off}
+    image: frappe/erpnext:${ERPNEXT_VERSION}
+    labels:
+      traefik.docker.network: traefik-public
+      traefik.enable: "true"
+      traefik.http.routers.${ROUTER}-http.entrypoints: http
+      traefik.http.routers.${ROUTER}-http.middlewares: https-redirect
+      traefik.http.routers.${ROUTER}-http.rule: Host(\`${SITES}\`)
+      traefik.http.routers.${ROUTER}-http.service: ${ROUTER}
+      traefik.http.routers.${ROUTER}-https.entrypoints: https
+      traefik.http.routers.${ROUTER}-https.rule: Host(\`${SITES}\`)
+      traefik.http.routers.${ROUTER}-https.service: ${ROUTER}
+      traefik.http.routers.${ROUTER}-https.tls: "true"
+      traefik.http.routers.${ROUTER}-https.tls.certresolver: ${CERT_RESOLVER:-le}
+      traefik.http.services.${ROUTER}.loadbalancer.server.port: "${HTTP_PUBLISH_PORT:-8080}"
+    networks:
+      bench-network:
+      traefik-public:
+    platform: ${PLATFORM:="linux/amd64"}
+    restart: always
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+
+  queue-long:
+    command: ["bench", "worker", "--queue", "${LONG_QUEUE:-long,default,short}"]
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+    image: frappe/erpnext:${ERPNEXT_VERSION}
+    networks:
+      bench-network:
+      mariadb-network:
+    platform: ${PLATFORM:="linux/amd64"}
+    restart: always
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+
+  queue-short:
+    command: ["bench", "worker", "--queue", "${SHORT_QUEUE:-short,default}"]
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+    image: frappe/erpnext:${ERPNEXT_VERSION}
+    networks:
+      bench-network:
+      mariadb-network:
+    platform: ${PLATFORM:="linux/amd64"}
+    restart: always
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+
+  redis-cache:
+    image: ${REDIS_IMAGE:-redis:6.2-alpine}
+    networks:
+      bench-network:
+      mariadb-network:
+    volumes:
+      - redis-cache-data:/data
+
+  redis-queue:
+    image: ${REDIS_IMAGE:-redis:6.2-alpine}
+    networks:
+      bench-network:
+      mariadb-network:
+    volumes:
+      - redis-queue-data:/data
+
+  scheduler:
+    command: ["bench", "schedule"]
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+    image: frappe/erpnext:${ERPNEXT_VERSION}
+    networks:
+      bench-network:
+      mariadb-network:
+    platform: ${PLATFORM:="linux/amd64"}
+    restart: always
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+
+  websocket:
+    command: ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+    image: frappe/erpnext:${ERPNEXT_VERSION}
+    networks:
+      bench-network:
+      mariadb-network:
+    platform: ${PLATFORM:="linux/amd64"}
+    restart: always
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+
+networks:
+  bench-network:
+    name: ${BENCH_NETWORK}
+    driver_opts:
+      com.docker.network.driver.mtu: ${NETWORK_MTU:-1400}
+  mariadb-network:
+    name: ${MARIADB_NETWORK:-mariadb-network}
+    driver_opts:
+      com.docker.network.driver.mtu: ${NETWORK_MTU:-1400}
+    external: true
+  traefik-public:
+    name: ${TRAEFIK_PUBLIC_NETWORK:-traefik-public}
+    driver_opts:
+      com.docker.network.driver.mtu: ${NETWORK_MTU:-1400}
+    external: true
+
+volumes:
+  redis-cache-data:
+    name: ${REDIS_CACHE_VOLUME:-${COMPOSE_PROJECT_NAME:-erpnext}_redis-cache-data}
+  redis-queue-data:
+    name: ${REDIS_QUEUE_VOLUME:-${COMPOSE_PROJECT_NAME:-erpnext}_redis-queue-data}
+  sites:
+    name: ${SITES_VOLUME:-${COMPOSE_PROJECT_NAME:-erpnext}_sites}
+
+x-backend-defaults:
+  depends_on:
+    configurator:
+      condition: service_completed_successfully
+  image: frappe/erpnext:${ERPNEXT_VERSION}
+  restart: always
+  volumes:
+    - sites:/home/frappe/frappe-bench/sites
+
+x-customizable-image:
+  image: frappe/erpnext:${ERPNEXT_VERSION}
+  restart: always
+
+x-depends-on-configurator:
+  depends_on:
+    configurator:
+      condition: service_completed_successfully
+
